@@ -1,0 +1,132 @@
+esphome:
+  name: riego-cesped
+  friendly_name: Riego Césped
+
+esp8266:
+  board: nodemcuv2
+
+# Enable logging
+logger:
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: "your-api-key"
+
+ota:
+  - platform: esphome
+    password: "your-ota-pwd"
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  manual_ip:
+    static_ip: 192.168.XX.XX
+    gateway: 192.168.XX.X
+    subnet: 255.255.255.0
+    dns1: 8.8.8.8
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "Riego-Cesped Fallback Hotspot"
+    password: "your-ap-password"
+
+captive_portal:
+
+globals:
+  - id: wifi_estable
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+interval:
+  - interval: 10s
+    then:
+      - lambda: |-
+          if (id(sntp_time).now().year >= 2023) {
+            // Hora sincronizada
+            id(wifi_estable) = true;
+          } else {
+            id(wifi_estable) = false;
+          }
+
+switch:
+  - platform: gpio
+    pin: GPIO14
+    id: rele_riego
+    name: "Riego Actuador Rele"
+    restore_mode: ALWAYS_OFF
+    inverted: false
+  
+  - platform: gpio
+    pin: GPIO12
+    id: rele_extra
+    name: "Ventilador Inversor"
+    restore_mode: ALWAYS_OFF
+    inverted: false
+
+  - platform: template
+    name: "Riego Manual (temporizado 10 min)"
+    turn_on_action:
+      - switch.turn_on: rele_riego
+      - delay: 10min
+      - switch.turn_off: rele_riego
+    turn_off_action:
+      - switch.turn_off: rele_riego
+
+text_sensor:
+  - platform: template
+    name: "Último riego de respaldo"
+    id: ultimo_riego_respaldo
+    icon: "mdi:calendar-clock"
+
+  - platform: template
+    name: "Hora actual"
+    id: hora_actual
+    update_interval: 60s
+    lambda: |-
+      char buffer[25];
+      auto now = id(sntp_time).now();
+      time_t timestamp = now.timestamp;
+      strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", localtime(&timestamp));
+      return std::string(buffer);
+
+binary_sensor:
+  - platform: template
+    name: "Modo respaldo (sin WiFi)"
+    lambda: 'return !id(wifi_estable);'
+    icon: "mdi:lan-disconnect"
+
+time:
+  - platform: sntp
+    id: sntp_time
+    timezone: Europe/Madrid
+    servers:
+      - 0.pool.ntp.org
+      - 1.pool.ntp.org
+      - 2.pool.ntp.org
+    on_time:
+      - seconds: 0
+        minutes: 0
+        hours: 1
+        then:
+          - if:
+              condition:
+                lambda: |-
+                  // Solo si la hora está sincronizada y WiFi no está estable
+                  return id(sntp_time).now().year >= 2023 && !id(wifi_estable);
+              then:
+                - logger.log: "Sin WiFi estable. Activando riego de respaldo"
+                - switch.turn_on: rele_riego
+                - delay: 10min
+                - switch.turn_off: rele_riego
+                - text_sensor.template.publish:
+                    id: ultimo_riego_respaldo
+                    state: !lambda |-
+                      auto t = id(sntp_time).now();
+                      char buffer[25];
+                      time_t timestamp = t.timestamp;
+                      strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", localtime(&timestamp));
+                      return std::string(buffer);
+              else:
+                - logger.log: "WiFi estuvo disponible, no se activa riego de respaldo."
